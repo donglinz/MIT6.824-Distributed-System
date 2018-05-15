@@ -2,11 +2,12 @@ package raft
 
 import (
 	"log"
-	"sync"
-	"time"
 	"os"
 	"runtime"
 	"fmt"
+	"sync"
+	"time"
+	"math/rand"
 )
 
 // Debugging
@@ -40,15 +41,20 @@ func DPrintf(logLevel int, rf *Raft, format string, a ...interface{}) (n int, er
 	if Debug <= 0 {
 		return
 	}
+
+	if rf == nil {
+		DPrintfInner(fmt.Sprintf("Testing log " + format, a...))
+		return
+	}
 	_, file, line, _ := runtime.Caller(1)
 	file = file[58:]
 	switch logLevel {
 	case LogLevelInfo:
-		DPrintfInner(fmt.Sprintf("%v:%v: INFO: ServerId|Term: %v|%v ", file, line, rf.me, rf.currentTerm) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: INFO: ServerId|State|Term: %v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm) + format, a...)
 	case LogLevelWarning:
-		DPrintfInner(fmt.Sprintf("%v:%v: WARN: ServerId|Term: %v|%v ", file, line, rf.me, rf.currentTerm) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: WARN: ServerId|State|Term: %v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm) + format, a...)
 	case LogLevelError:
-		DPrintfInner(fmt.Sprintf("%v:%v: ERROR: ServerId|Term: %v|%v ", file, line, rf.me, rf.currentTerm) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: ERROR: ServerId|State|Term: %v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm) + format, a...)
 	}
 	return
 }
@@ -56,74 +62,74 @@ func DPrintf(logLevel int, rf *Raft, format string, a ...interface{}) (n int, er
 
 type TimerMgr struct {
 	mtx             sync.Mutex
-	channel         chan int             // triggered timer.
-	timerID         int
-	callbackMap     map[int]func()
-	intervalMap     map[int]func() time.Duration
-	delCount        map[int]int
-}
+	channel         chan int             	// triggered timer.
 
+	callback     	func(int)
+	intervalGen  	func() time.Duration
+	timerId         int 					// event identifier
+	stop			bool
+}
 func NewTimerMgr() *TimerMgr {
 	return &TimerMgr{
-		callbackMap:	map[int]func() {},
-		intervalMap:	map[int]func() time.Duration{},
-		delCount:		map[int]int{},
-		channel:		make(chan int),
+		channel:		make(chan int, 10),
 	}
 }
-
-func (mgr *TimerMgr) AddTimer(callback func(), interval func() time.Duration) int {
+func (mgr *TimerMgr) SetEvent(callback func(int), intervalGen func() time.Duration) {
 	mgr.mtx.Lock()
 	defer mgr.mtx.Unlock()
-	mgr.timerID++
-	timerId := mgr.timerID
-	mgr.callbackMap[timerId] = callback
-	mgr.intervalMap[timerId] = interval
 
-	time.AfterFunc(interval(), func(){ mgr.channel <- timerId })
+	mgr.timerId++
+	mgr.callback = callback
+	mgr.intervalGen = intervalGen
 
-	return timerId
+	go func(timerId int) {
+		time.AfterFunc(mgr.intervalGen(), func(){ mgr.channel <- timerId })
+	}(mgr.timerId)
 }
 
-func (mgr *TimerMgr) ResetTimer(timerId int) {
+func (mgr *TimerMgr) ResetCurrentEvent() {
 	mgr.mtx.Lock()
 	defer mgr.mtx.Unlock()
-	mgr.delCount[timerId]++
+	mgr.timerId++
 
-	time.AfterFunc(mgr.intervalMap[timerId](), func(){ mgr.channel <- timerId })
+	go func(timerId int) {
+		time.AfterFunc(mgr.intervalGen(), func(){
+			mgr.channel <- timerId
+		})
+	}(mgr.timerId)
 }
 
-func (mgr *TimerMgr) DelTimer(timerId int) {
-	mgr.mtx.Lock()
-	defer mgr.mtx.Unlock()
-	mgr.delCount[timerId]++
-	delete(mgr.callbackMap, timerId)
-	delete(mgr.intervalMap, timerId)
-}
-
-// run this method in a particular goroutine.
 func (mgr *TimerMgr) Schedule() {
 	for {
-		timerId := <- mgr.channel
-
-		mgr.mtx.Lock()
-		if mgr.delCount[timerId] > 0 {
-			mgr.delCount[timerId]--
-			if _, ok := mgr.callbackMap[timerId]; !ok {
-				delete(mgr.delCount, timerId)
+		if mgr.stop {
+			return
+		}
+		currentTimerId := 0
+		for {
+			currentTimerId = <- mgr.channel
+			if currentTimerId == mgr.timerId {
+				//fmt.Println(currentTimerId, mgr.timerId)
+				break
 			}
-			mgr.mtx.Unlock()
-			continue
 		}
 
-		if _, ok := mgr.callbackMap[timerId]; ok {
-			go mgr.callbackMap[timerId]()
-
-			interval := mgr.intervalMap[timerId]
-			time.AfterFunc(interval(), func(){ mgr.channel <- timerId })
+		if mgr.stop {
+			return
 		}
+		// unlock in callback goroutine
+		go mgr.callback(currentTimerId)
 
-		mgr.mtx.Unlock()
+
+		go func(timerId int) {
+			time.AfterFunc(mgr.intervalGen(), func(){
+				mgr.mtx.Lock()
+				if mgr.timerId == timerId {
+					mgr.timerId++
+					mgr.channel <- timerId + 1
+				}
+				mgr.mtx.Unlock()
+			})
+		}(currentTimerId)
 	}
 }
 
@@ -147,5 +153,19 @@ func RunUntil(fc interface{}, stopCondition func() bool, args ...interface{}) {
 			break
 		}
 
+	}
+}
+
+
+var seedMu sync.Mutex
+var seedFlag = 0
+func InitRandSeed() {
+	if seedFlag == 0 {
+		seedMu.Lock()
+		if seedFlag == 0 {
+			rand.Seed(time.Now().UnixNano())
+			seedFlag = 1
+		}
+		seedMu.Unlock()
 	}
 }
