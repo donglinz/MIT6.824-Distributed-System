@@ -356,7 +356,6 @@ func(rf * Raft) sendAppendEntriesCallback(appendEntriesReplyList []AppendEntries
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	panic("not implemented")
 	index := -1
 	term := -1
 	isLeader := true

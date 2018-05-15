@@ -121,6 +121,7 @@ func (mgr *TimerMgr) Schedule() {
 
 
 		go func(timerId int) {
+			mgr.mtx.Lock()
 			time.AfterFunc(mgr.intervalGen(), func(){
 				mgr.mtx.Lock()
 				if mgr.timerId == timerId {
@@ -129,6 +130,7 @@ func (mgr *TimerMgr) Schedule() {
 				}
 				mgr.mtx.Unlock()
 			})
+			mgr.mtx.Unlock()
 		}(currentTimerId)
 	}
 }
