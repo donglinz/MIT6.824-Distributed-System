@@ -56,41 +56,42 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu          sync.Mutex          // Lock to protect shared access to this peer's state, goroutine cannot block after acquire lock.
-	muCond      sync.Cond
-	peers       []*labrpc.ClientEnd // RPC end points of all peers
-	persister   *Persister          // Object to hold this peer's persisted state
-	me          int                 // this peer's index into peers[]
-	serverCount int
+	mu          	sync.Mutex          // Lock to protect shared access to this peer's state, goroutine cannot block after acquire lock.
+	muCond      	*sync.Cond
+	peers       	[]*labrpc.ClientEnd // RPC end points of all peers
+	persister   	*Persister          // Object to hold this peer's persisted state
+	me          	int                 // this peer's index into peers[]
+	serverCount 	int
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
 	// Persistent state for all servers.
-	currentTerm int
-	voteFor     int
-	log         []interface{}
-	logTerm     []int
+	currentTerm 	int
+	voteFor     	int
+	log         	[]interface{}
+	logTerm     	[]int
+	heartBeatBuffer []interface{}
 
 	// Volatile state on all servers.
-	commitIndex int
-	lastApplied int
+	commitIndex 	int
+	lastApplied 	int
 
 	// Volatile state on leaders
-	nextIndex   []int
-	matchIndex  []int
+	nextIndex   	[]int
+	matchIndex  	[]int
 
 	// Server state.
-	state       int
+	state       	int
 
 
 	// Read only field
-	electionTimePeriod   time.Duration
-	electionTimeWave  time.Duration
-	heartBeatPeriod  time.Duration
+	electionTimePeriod  time.Duration
+	electionTimeWave  	time.Duration
+	heartBeatPeriod  	time.Duration
 
 	// Timer
-	timerMgr     *TimerMgr
+	timerMgr     		*TimerMgr
 
 
 }
@@ -205,6 +206,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer DPrintf(LogLevelInfo, rf, "Get RequestVote rpc from %v, Term %v, Reply %v", args.CandidateIndex, args.Term, *reply)
 
 
 	if args.Term > rf.currentTerm ||
@@ -223,60 +225,96 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 
-	DPrintf(LogLevelInfo, rf, "Get RequestVote rpc from %v, Term %v, Reply %v", args.CandidateIndex, args.Term, *reply)
-
 }
-
+func (rf *Raft) AppendEntriesPreCheck(args *AppendEntriesArgs) bool {
+	return args.PrevLogTerm == rf.logTerm[args.PrevLogIndex]
+}
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// TODO
-
 	rf.mu.Lock()
+	defer rf.muCond.Broadcast()
 	defer rf.mu.Unlock()
+	defer DPrintf(LogLevelInfo, rf, "Get AppendEntries RPC from %v, Term %v, Reply %v\n", args.LeaderId, args.Term, *reply)
 
-	if len(args.Entries) == 0 { // heart beat message.
-		switch rf.state {
-		case ServerStateLeader:
-			if args.Term < rf.currentTerm {
-				reply.Term = rf.currentTerm
-				reply.Success = false
-				return
-			}
-
-			if args.Term == rf.currentTerm {
-				DPrintf(LogLevelWarning, rf, "2 leader with identical term")
-			}
-			rf.ChangeState(rf.state, ServerStateFollower)
-			rf.voteFor = args.LeaderId
-			rf.currentTerm = args.Term
-
-			reply.Term = args.Term
-			reply.Success = true
-		case ServerStateCandidate:
-			rf.ChangeState(rf.state, ServerStateFollower)
-			rf.voteFor = args.LeaderId
-			rf.currentTerm = args.Term
-
-			reply.Term = args.Term
-			reply.Success = true
-		case ServerStateFollower:
-			if args.Term > rf.currentTerm ||
-				(args.Term == rf.currentTerm && rf.voteFor == args.LeaderId){
-				rf.ResetCurrentTimer()
-				rf.voteFor = args.LeaderId
-				rf.currentTerm = args.Term
-
-				reply.Term = args.Term
-				reply.Success = true
-			} else {
-				reply.Term = rf.currentTerm
-				reply.Success = false
-			}
-		}
-	} else {
-		panic("not implemented")
+	for ; args.PrevLogIndex > rf.lastApplied ;{
+		rf.muCond.Wait()
 	}
 
-	DPrintf(LogLevelInfo, rf, "Get AppendEntries RPC from %v, Term %v, Reply %v\n", args.LeaderId, args.Term, *reply)
+
+	if !rf.AppendEntriesPreCheck(args) {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+
+	switch rf.state {
+	case ServerStateLeader:
+		if args.Term < rf.currentTerm {
+			reply.Term = rf.currentTerm
+			reply.Success = false
+			return
+		}
+
+		if args.Term == rf.currentTerm {
+			DPrintf(LogLevelWarning, rf, "2 leader with identical term")
+		}
+		rf.ChangeState(rf.state, ServerStateFollower)
+		rf.voteFor = args.LeaderId
+		rf.currentTerm = args.Term
+
+		reply.Term = args.Term
+		reply.Success = true
+	case ServerStateCandidate:
+		rf.ChangeState(rf.state, ServerStateFollower)
+		rf.voteFor = args.LeaderId
+		rf.currentTerm = args.Term
+
+		reply.Term = args.Term
+		reply.Success = true
+	case ServerStateFollower:
+		if args.Term > rf.currentTerm ||
+			(args.Term == rf.currentTerm && rf.voteFor == args.LeaderId){
+			rf.ResetCurrentTimer()
+			rf.voteFor = args.LeaderId
+			rf.currentTerm = args.Term
+
+			reply.Term = args.Term
+			reply.Success = true
+		} else {
+			reply.Term = rf.currentTerm
+			reply.Success = false
+		}
+	}
+
+	if len(args.Entries) == 0 || !reply.Success {
+		return
+	}
+
+	// append log
+	if len(rf.log) != len(rf.logTerm) {
+		DPrintf(LogLevelError, rf, "length of Raft.log mismatch with Raft.logTerm")
+		return
+	}
+	for idx := args.PrevLogIndex + 1; idx <= args.PrevLogIndex + len(args.Entries); idx++ {
+		if idx < len(rf.log) {
+			rf.log[idx] = args.Entries[idx - args.PrevLogIndex]
+			rf.logTerm[idx] = rf.currentTerm
+		} else {
+			rf.log = append(rf.log, args.Entries[idx - args.PrevLogIndex])
+			rf.logTerm = append(rf.logTerm, rf.currentTerm)
+		}
+	}
+	rf.lastApplied = args.PrevLogIndex + len(args.Entries)
+
+	// change commit status
+	if args.LeaderCommit < rf.commitIndex {
+		DPrintf(LogLevelWarning, rf, "commit log index ahead of leader, possibly inconsistent")
+		rf.commitIndex = args.LeaderCommit
+	}
+
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = Min(args.LeaderCommit, rf.lastApplied)
+	}
 }
 
 //
@@ -360,6 +398,9 @@ func(rf * Raft) sendAppendEntriesCallback(appendEntriesReplyList []AppendEntries
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	index := -1
 	term := -1
 	isLeader := true
@@ -370,7 +411,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-
+	rf.heartBeatBuffer = append(rf.heartBeatBuffer, command)
+	index = rf.lastApplied + len(rf.heartBeatBuffer)
+	term = rf.currentTerm
 
 	return index, term, isLeader
 }
@@ -611,6 +654,7 @@ func (rf *Raft) ChangeState(oldState int, newState int) {
 	switch oldState {
 	case ServerStateLeader:
 		// rf.timerMgr.DelTimer(rf.timerId)
+		rf.heartBeatBuffer = []interface{}{}
 	case ServerStateCandidate:
 		// rf.timerMgr.DelTimer(rf.timerId)
 	case ServerStateFollower:
@@ -654,7 +698,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteFor = -1
 
 	for idx := 0 ; idx < rf.serverCount ; idx++ {
-		rf.nextIndex = append(rf.nextIndex, 0)
+		rf.nextIndex = append(rf.nextIndex, 1)
 		rf.matchIndex = append(rf.matchIndex, 0)
 	}
 
@@ -662,9 +706,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimeWave = time.Millisecond * 100
 	rf.heartBeatPeriod = time.Millisecond * 130
 
-	rf.log = append(rf.log, 0)
+	rf.log = append(rf.log, nil)
 	rf.logTerm = append(rf.logTerm, 0)
 
+	rf.muCond = sync.NewCond(&rf.mu)
 
 
 	rf.timerMgr = NewTimerMgr()
