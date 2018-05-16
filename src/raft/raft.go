@@ -57,8 +57,7 @@ type ApplyMsg struct {
 //
 type Raft struct {
 	mu          sync.Mutex          // Lock to protect shared access to this peer's state, goroutine cannot block after acquire lock.
-	stateMu     sync.Mutex          // Lock to protect state transfer, goroutine cannot block after acquire lock.
-	//loopMu		sync.Mutex			// Lock to protect state loop, prevent more than one loop exec simultaneously.
+	muCond      sync.Cond
 	peers       []*labrpc.ClientEnd // RPC end points of all peers
 	persister   *Persister          // Object to hold this peer's persisted state
 	me          int                 // this peer's index into peers[]
@@ -99,7 +98,8 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	var term int
 	var isLeader bool
 	// Your code here (2A).
@@ -309,7 +309,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	rf.mu.Lock()
 	DPrintf(LogLevelInfo, rf, "Send request vote to server %v\n", server)
+	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -317,7 +319,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	rf.mu.Lock()
 	DPrintf(LogLevelInfo, rf, "Send Append Entries to server %v\n", server)
+	rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -402,15 +406,14 @@ func (rf *Raft) StartElection(elapseSignature int) {
 	// TODO expire termination.
 	// TODO Lock service.
 
+	rf.mu.Lock()
 	if rf.state != ServerStateCandidate {
 		DPrintf(LogLevelWarning, rf,"Raft state is not leader.")
+		rf.mu.Unlock()
 		return
 	}
-
-	rf.mu.Lock()
 	rf.currentTerm++
 	rf.voteFor = rf.me
-	rf.mu.Unlock()
 
 	DPrintf(LogLevelInfo, rf, "Election start, current term %v\n", rf.currentTerm)
 
@@ -420,6 +423,7 @@ func (rf *Raft) StartElection(elapseSignature int) {
 		LastLogIndex:		rf.lastApplied,
 		LastLogTerm:		rf.logTerm[rf.lastApplied],
 	}
+	rf.mu.Unlock()
 
 	requestVoteReplyList := make([]RequestVoteReply, rf.serverCount)
 	for idx := range requestVoteReplyList {
@@ -431,6 +435,7 @@ func (rf *Raft) StartElection(elapseSignature int) {
 	waitMu := &sync.Mutex{}
 	cond := sync.NewCond(waitMu)
 	waitMu.Lock()
+	defer waitMu.Unlock()
 
 	for idx := range rf.peers {
 		if idx == rf.me {
@@ -441,27 +446,30 @@ func (rf *Raft) StartElection(elapseSignature int) {
 			RunUntil(func(args ...interface{})bool {
 				return rf.sendRequestVote(args[0].(int), args[1].(*RequestVoteArgs), args[2].(*RequestVoteReply))
 			}, func() bool {
+				waitMu.Lock()
+				defer waitMu.Unlock()
 				return forceStop || voteNum * 2 > rf.serverCount
 			}, serverIdx, &requestVoteArgs, &requestVoteReplyList[serverIdx])
 
-			if forceStop || elapseSignature != rf.timerMgr.timerId {
+			LockGroup(waitMu, &rf.mu)
+			defer UnlockGroup(waitMu, &rf.mu)
+			if forceStop || elapseSignature != rf.timerMgr.GetTimerId() {
 				forceStop = true
 				return
 			}
 
 			if requestVoteReplyList[serverIdx].VoteGranted {
 				DPrintf(LogLevelInfo, rf, "Get vote from server %v, Term %v\n", serverIdx, requestVoteReplyList[serverIdx].Term)
-				waitMu.Lock()
+
 				voteNum++
 				if voteNum * 2 > rf.serverCount {
 					cond.Signal()
 				}
-				waitMu.Unlock()
 			} else {
 				DPrintf(LogLevelInfo, rf, "Server %v decline vote\n", serverIdx)
 			}
 
-			if elapseSignature == rf.timerMgr.timerId &&
+			if elapseSignature == rf.timerMgr.GetTimerId() &&
 				requestVoteReplyList[serverIdx].Term != -1 && requestVoteReplyList[serverIdx].Term > rf.currentTerm &&
 				voteNum < rf.serverCount { // to not degrace leader if it has been elected.
 				forceStop = true
@@ -484,11 +492,12 @@ func (rf *Raft) StartElection(elapseSignature int) {
 			break
 		}
 	}
-	waitMu.Unlock()
+
+	rf.mu.Lock()
 
 	DPrintf(LogLevelInfo, rf, "Election end, get %v vote(s) out of %v\n", voteNum, rf.serverCount)
 
-	if forceStop || elapseSignature != rf.timerMgr.timerId{
+	if forceStop || elapseSignature != rf.timerMgr.GetTimerId(){
 		return
 	}
 
@@ -497,6 +506,8 @@ func (rf *Raft) StartElection(elapseSignature int) {
 		rf.ChangeState(rf.state, ServerStateLeader)
 		rf.SendHeartBeat(elapseSignature)
 	}
+	rf.mu.Unlock()
+
 }
 
 func (rf *Raft) SendHeartBeat(elapseSignature int) {
@@ -534,9 +545,10 @@ func (rf *Raft) SendHeartBeat(elapseSignature int) {
 // make sure only the latest periodic method can execute, the signature should
 // identical with timeId in rf.timerMgr
 func (rf *Raft) LeaderLoop(elapseSignature int) {
-
-	if elapseSignature != rf.timerMgr.timerId {
-		DPrintf(LogLevelInfo, rf,"Leader loop mismatch. expect %v, get %v\n", elapseSignature, rf.timerMgr.timerId)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if elapseSignature != rf.timerMgr.GetTimerId() {
+		DPrintf(LogLevelInfo, rf,"Leader loop mismatch. expect %v, get %v\n", elapseSignature, rf.timerMgr.GetTimerId())
 		return
 	}
 
@@ -544,15 +556,16 @@ func (rf *Raft) LeaderLoop(elapseSignature int) {
 		DPrintf(LogLevelWarning, rf, "Current state expect Leader, found %v\n", rf.state)
 		return
 	}
-	DPrintf(LogLevelInfo, rf,"Leader loop start. %v %v\n", elapseSignature, rf.timerMgr.timerId)
+	DPrintf(LogLevelInfo, rf,"Leader loop start. %v %v\n", elapseSignature, rf.timerMgr.GetTimerId())
 
 	rf.SendHeartBeat(elapseSignature)
 }
 
 func (rf *Raft) CandidateLoop(elapseSignature int) {
-
-	if elapseSignature != rf.timerMgr.timerId {
-		DPrintf(LogLevelInfo, rf,"Candidate loop mismatch. expect %v, get %v\n", elapseSignature, rf.timerMgr.timerId)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if elapseSignature != rf.timerMgr.GetTimerId() {
+		DPrintf(LogLevelInfo, rf,"Candidate loop mismatch. expect %v, get %v\n", elapseSignature, rf.timerMgr.GetTimerId())
 		return
 	}
 
@@ -560,15 +573,19 @@ func (rf *Raft) CandidateLoop(elapseSignature int) {
 		DPrintf(LogLevelWarning, rf, "Current state expect Candidate, found %v\n", rf.state)
 		return
 	}
-	DPrintf(LogLevelInfo, rf, "Candidate loop start. %v %v\n", elapseSignature, rf.timerMgr.timerId)
+	DPrintf(LogLevelInfo, rf, "Candidate loop start. %v %v\n", elapseSignature, rf.timerMgr.GetTimerId())
 
+	rf.mu.Unlock()
 	rf.StartElection(elapseSignature)
+	rf.mu.Lock()
 }
 
 func (rf *Raft) FollowerLoop(elapseSignature int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	if elapseSignature != rf.timerMgr.timerId {
-		DPrintf(LogLevelInfo, rf,"Follower loop mismatch. expect %v, get %v\n", elapseSignature, rf.timerMgr.timerId)
+	if elapseSignature != rf.timerMgr.GetTimerId() {
+		DPrintf(LogLevelInfo, rf,"Follower loop mismatch. expect %v, get %v\n", elapseSignature, rf.timerMgr.GetTimerId())
 		return
 	}
 
@@ -576,14 +593,12 @@ func (rf *Raft) FollowerLoop(elapseSignature int) {
 		DPrintf(LogLevelWarning, rf, "Current state expect Follower, found %v\n", rf.state)
 		return
 	}
-	DPrintf(LogLevelInfo, rf, "Follower loop start. %v %v\n", elapseSignature, rf.timerMgr.timerId)
+	DPrintf(LogLevelInfo, rf, "Follower loop start. %v %v\n", elapseSignature, rf.timerMgr.GetTimerId())
 
 	rf.ChangeState(rf.state, ServerStateCandidate)
 }
 
 func (rf *Raft) ChangeState(oldState int, newState int) {
-	rf.stateMu.Lock()
-	defer rf.stateMu.Unlock()
 
 	DPrintf(LogLevelInfo, rf,"State transfer from %v to %v\n", StateName[oldState], StateName[newState])
 	if rf.state != oldState {
@@ -657,8 +672,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Start from follower.
 	rf.state = ServerStateNone
-	rf.ChangeState(ServerStateNone, ServerStateFollower)
 
+	rf.mu.Lock()
+	rf.ChangeState(ServerStateNone, ServerStateFollower)
+	rf.mu.Unlock()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -83,6 +83,8 @@ func (mgr *TimerMgr) SetEvent(callback func(int), intervalGen func() time.Durati
 	mgr.intervalGen = intervalGen
 
 	go func(timerId int) {
+		mgr.mtx.Lock()
+		defer mgr.mtx.Unlock()
 		time.AfterFunc(mgr.intervalGen(), func(){ mgr.channel <- timerId })
 	}(mgr.timerId)
 }
@@ -93,10 +95,18 @@ func (mgr *TimerMgr) ResetCurrentEvent() {
 	mgr.timerId++
 
 	go func(timerId int) {
+		mgr.mtx.Lock()
+		defer mgr.mtx.Unlock()
 		time.AfterFunc(mgr.intervalGen(), func(){
 			mgr.channel <- timerId
 		})
 	}(mgr.timerId)
+}
+
+func (mgr *TimerMgr) GetTimerId() int {
+	mgr.mtx.Lock()
+	defer mgr.mtx.Unlock()
+	return mgr.timerId
 }
 
 func (mgr *TimerMgr) Schedule() {
@@ -107,7 +117,7 @@ func (mgr *TimerMgr) Schedule() {
 		currentTimerId := 0
 		for {
 			currentTimerId = <- mgr.channel
-			if currentTimerId == mgr.timerId {
+			if currentTimerId == mgr.GetTimerId() {
 				//fmt.Println(currentTimerId, mgr.timerId)
 				break
 			}
@@ -116,9 +126,11 @@ func (mgr *TimerMgr) Schedule() {
 		if mgr.stop {
 			return
 		}
-		// unlock in callback goroutine
-		go mgr.callback(currentTimerId)
-
+		mgr.mtx.Lock()
+		go func(callback func(int), para int) {
+			callback(para)
+		}(mgr.callback, currentTimerId)
+		mgr.mtx.Unlock()
 
 		go func(timerId int) {
 			mgr.mtx.Lock()
@@ -169,5 +181,17 @@ func InitRandSeed() {
 			seedFlag = 1
 		}
 		seedMu.Unlock()
+	}
+}
+
+func LockGroup(args ...sync.Locker) {
+	for _, lock := range args {
+		lock.Lock()
+	}
+}
+
+func UnlockGroup(args ...sync.Locker) {
+	for _, lock := range args {
+		lock.Unlock()
 	}
 }
