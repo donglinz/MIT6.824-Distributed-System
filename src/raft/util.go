@@ -10,15 +10,18 @@ import (
 	"math/rand"
 )
 
-// Debugging
-const Debug = 1
-var initFlag bool
-const logFile  = "/home/ubuntu/Desktop/MIT6.824-Distributed-System/src/raft/log.log"
 const (
-	LogLevelInfo = iota
+	LogLevelDebug = iota
+	LogLevelInfo
 	LogLevelWarning
 	LogLevelError
 )
+
+// Debugging
+const LogLevelFilter = LogLevelDebug
+var initFlag bool
+const logFile  = "/home/ubuntu/Desktop/MIT6.824-Distributed-System/src/raft/log.log"
+
 func DPrintfInner(format string, a ...interface{}) (n int, err error) {
 	if !initFlag {
 		initFlag = true
@@ -38,17 +41,19 @@ func DPrintfInner(format string, a ...interface{}) (n int, err error) {
 }
 
 func DPrintf(logLevel int, rf *Raft, format string, a ...interface{}) (n int, err error) {
-	if Debug <= 0 {
+	if logLevel < LogLevelFilter {
 		return
 	}
 
 	if rf == nil {
-		DPrintfInner(fmt.Sprintf("Testing log " + format, a...))
+		DPrintfInner(fmt.Sprintf("Golang Testing log " + format, a...))
 		return
 	}
 	_, file, line, _ := runtime.Caller(1)
 	file = file[58:]
 	switch logLevel {
+	case LogLevelDebug:
+		DPrintfInner(fmt.Sprintf("%v:%v: DEBUG: ServerId|State|Term: %v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm) + format, a...)
 	case LogLevelInfo:
 		DPrintfInner(fmt.Sprintf("%v:%v: INFO: ServerId|State|Term: %v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm) + format, a...)
 	case LogLevelWarning:
@@ -201,4 +206,72 @@ func Min(a int, b int) int{
 		return a
 	}
 	return b
+}
+
+func Max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// a wait group implementation won't panic if delta < 0, goroutines block on
+// wait will resume once delta <= 0
+type WaitGroupPlus struct{
+	mu 		sync.Mutex
+	muCond	*sync.Cond
+	delta	int
+	counter int
+}
+func NewWaitGroupPlus() *WaitGroupPlus {
+	wg := &WaitGroupPlus{}
+	wg.muCond = sync.NewCond(&wg.mu)
+	return wg
+}
+func (wg *WaitGroupPlus) Add(delta int) {
+	wg.mu.Lock()
+	defer wg.mu.Unlock()
+	wg.delta += delta
+	//if wg.delta <= 0 {
+	//	wg.muCond.Broadcast()
+	//}
+	if delta < 0 {
+		wg.counter -= delta
+	}
+}
+
+func (wg *WaitGroupPlus) Wait() {
+	wg.mu.Lock()
+	defer wg.mu.Unlock()
+	for ; ; {
+		wg.muCond.Wait()
+		if wg.delta <= 0 {
+			break
+		}
+	}
+}
+
+// if will block after invoke wait, return true, else false.
+func (wg *WaitGroupPlus) TryWait() bool {
+	wg.mu.Lock()
+	defer wg.mu.Unlock()
+	return wg.delta > 0
+}
+
+func (wg *WaitGroupPlus) Counter() int {
+	wg.mu.Lock()
+	defer wg.mu.Unlock()
+	return wg.counter
+}
+
+func (wg *WaitGroupPlus) Done() {
+	wg.Add(-1)
+	wg.muCond.Broadcast()
+}
+
+func (wg *WaitGroupPlus) ForceCancelWait() {
+	wg.mu.Lock()
+	wg.delta = 0
+	wg.mu.Unlock()
+	wg.muCond.Broadcast()
 }
