@@ -23,6 +23,9 @@ import (
 	"time"
 	"math/rand"
 	"sync/atomic"
+	"bytes"
+	"labgob"
+	"fmt"
 )
 
 // import "bytes"
@@ -57,12 +60,13 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu          	sync.Mutex          // Lock to protect shared access to this peer's state, goroutine cannot block after acquire lock.
-	// muCond      	*sync.Cond
-	peers       	[]*labrpc.ClientEnd // RPC end points of all peers
-	persister   	*Persister          // Object to hold this peer's persisted state
-	me          	int                 // this peer's index into peers[]
-	serverCount 	int
+	mu          		sync.Mutex          // Lock to protect shared access to this peer's state, goroutine cannot block after acquire lock.
+	// muCond      		*sync.Cond
+	// followerCommitMu 	sync.Mutex
+	peers       		[]*labrpc.ClientEnd // RPC end points of all peers
+	persister   		*Persister          // Object to hold this peer's persisted state
+	me          		int                 // this peer's index into peers[]
+	serverCount 		int
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -124,13 +128,18 @@ func (rf *Raft) GetState() (int, bool) {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.log)
+	e.Encode(rf.logTerm)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -142,17 +151,25 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	currentTerm := 0
+	voteFor := 0
+	var log []interface{}
+	var logTerm []int
+
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&voteFor) != nil ||
+		d.Decode(&log) != nil ||
+		d.Decode(&logTerm) != nil {
+	   	DPrintf(LogLevelError, rf, "Read persist error.")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.voteFor = voteFor
+		rf.log = log
+		rf.logTerm = logTerm
+		rf.lastApplied = len(log) - 1
+	}
 }
 
 
@@ -216,7 +233,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf(LogLevelDebug, rf, "rej, %v %v %v\n", args.Term, rf.currentTerm, rf.voteFor)
 	} else if args.LastLogTerm > rf.logTerm[rf.lastApplied] || // at least up-to-date
 		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex > rf.lastApplied) ||
-		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state != ServerStateLeader) { // at least up-to-date
+		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state == ServerStateCandidate) ||
+		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state == ServerStateFollower && rf.voteFor == -1) ||
+		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state == ServerStateFollower && rf.voteFor == args.CandidateIndex)	{ // at least up-to-date
 		/* (args.Term == rf.currentTerm && rf.state == ServerStateCandidate && rf.voteFor == args.CandidateIndex) */
 		reply.VoteGranted = true
 		rf.currentTerm = args.Term
@@ -224,7 +243,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		rf.ChangeState(rf.state, ServerStateFollower)
 		rf.voteFor = args.CandidateIndex
-
+		rf.persist()
 	} else {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -245,13 +264,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 
 	reply.CommitIndex = rf.commitIndex
-	if !rf.AppendEntriesPreCheck(args) {
-		reply.Success = false
-		reply.Term = rf.currentTerm
-		DPrintf(LogLevelInfo, rf, "Get AppendEntries RPC from %v, Term %v, Reply %v, Pre check fail.\n", args.LeaderId, args.Term, *reply)
-		return
-	}
-
 
 	switch rf.state {
 	case ServerStateLeader:
@@ -299,6 +311,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	if !rf.AppendEntriesPreCheck(args) {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		DPrintf(LogLevelInfo, rf, "Get AppendEntries RPC from %v, Term %v, Reply %v, Pre check fail.\n", args.LeaderId, args.Term, *reply)
+		return
+	}
+
 	if !reply.Success {
 		DPrintf(LogLevelInfo, rf, "Get AppendEntries RPC from %v, Term %v, Reply %v\n", args.LeaderId, args.Term, *reply)
 		return
@@ -320,6 +339,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	rf.lastApplied = args.PrevLogIndex + len(args.Entries)
+	rf.log = rf.log[:rf.lastApplied + 1]
+	rf.logTerm = rf.logTerm[:rf.lastApplied + 1]
+
 	if rf.commitIndex > rf.lastApplied {
 		rf.commitIndex = rf.lastApplied
 		reply.CommitIndex = rf.commitIndex
@@ -333,19 +355,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
+		// rf.followerCommitMu.Lock()
 		go func(lastCommit int, newCommit int) {
+			// defer rf.followerCommitMu.Unlock()
 			for idx := lastCommit + 1; idx <= newCommit; idx++ {
 				rf.mu.Lock()
 				msg := ApplyMsg{true, rf.log[idx], idx}
 				rf.mu.Unlock()
-				rf.applyCh <- msg
+				select {
+				case rf.applyCh <- msg:
+
+				case <-time.After(time.Second):
+					fmt.Println("Write applyCh timeout!!")
+				}
 			}
 		}(rf.commitIndex, Min(args.LeaderCommit, rf.lastApplied))
+
 		rf.commitIndex = Min(args.LeaderCommit, rf.lastApplied)
 		reply.CommitIndex = rf.commitIndex
 	}
 
+	rf.persist()
 	DPrintf(LogLevelInfo, rf, "Get AppendEntries RPC from %v, Term %v, Reply %v, applied|commit %v|%v\n", args.LeaderId, args.Term, *reply, rf.lastApplied, rf.commitIndex)
+
 }
 
 //
@@ -463,6 +495,11 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	//DPrintf(LogLevelInfo, rf, "Kill")
 	// rf.timerMgr.stop = true
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.persist()
+	rf.timerMgr.stop = true
+	DPrintf(LogLevelInfo, rf, "Server Stop.")
 }
 
 // Generate Duration range in range
@@ -710,7 +747,7 @@ func (rf *Raft) SendHeartBeat(elapseSignature int) {
 			}
 
 			rf.commitIndex = lastApplied
-
+			rf.persist()
 		}
 	}(elapseSignature)
 /*
@@ -752,8 +789,8 @@ func (rf *Raft) LeaderLoop(elapseSignature int) {
 		DPrintf(LogLevelWarning, rf, "Current state expect Leader, found %v\n", rf.state)
 		return
 	}
-	DPrintf(LogLevelInfo, rf,"Leader loop start. %v %v\n", elapseSignature, rf.timerMgr.GetTimerId())
-
+	DPrintf(LogLevelInfo, rf,"Leader loop start. LastLogTerm|LastLogIndex %v|%v\n", rf.logTerm[rf.lastApplied], rf.lastApplied)
+	rf.persist()
 	rf.SendHeartBeat(elapseSignature)
 }
 
@@ -769,7 +806,7 @@ func (rf *Raft) CandidateLoop(elapseSignature int) {
 		DPrintf(LogLevelWarning, rf, "Current state expect Candidate, found %v\n", rf.state)
 		return
 	}
-	DPrintf(LogLevelInfo, rf, "Candidate loop start. %v %v\n", elapseSignature, rf.timerMgr.GetTimerId())
+	DPrintf(LogLevelInfo, rf, "Candidate loop start. LastLogTerm|LastLogIndex %v|%v\n", rf.logTerm[rf.lastApplied], rf.lastApplied)
 
 	rf.mu.Unlock()
 	rf.StartElection(elapseSignature)
@@ -789,7 +826,7 @@ func (rf *Raft) FollowerLoop(elapseSignature int) {
 		DPrintf(LogLevelWarning, rf, "Current state expect Follower, found %v\n", rf.state)
 		return
 	}
-	DPrintf(LogLevelInfo, rf, "Follower loop start. %v %v\n", elapseSignature, rf.timerMgr.GetTimerId())
+	DPrintf(LogLevelInfo, rf, "Follower loop start. LastLogTerm|LastLogIndex %v|%v\n", rf.logTerm[rf.lastApplied], rf.lastApplied)
 
 	rf.ChangeState(rf.state, ServerStateCandidate)
 }

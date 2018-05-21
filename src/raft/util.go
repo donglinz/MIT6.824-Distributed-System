@@ -31,6 +31,7 @@ func DPrintfInner(format string, a ...interface{}) (n int, err error) {
 			if err != nil {
 				panic(err)
 			}
+
 			log.SetOutput(fd)
 
 		}
@@ -53,13 +54,13 @@ func DPrintf(logLevel int, rf *Raft, format string, a ...interface{}) (n int, er
 	file = file[58:]
 	switch logLevel {
 	case LogLevelDebug:
-		DPrintfInner(fmt.Sprintf("%v:%v: DEBUG: ServerId|State|Term: %v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: DEBUG: ServerId|State|Term|Sign: %v|%v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId()) + format, a...)
 	case LogLevelInfo:
-		DPrintfInner(fmt.Sprintf("%v:%v: INFO: ServerId|State|Term: %v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: INFO: ServerId|State|Term|Sign: %v|%v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId()) + format, a...)
 	case LogLevelWarning:
-		DPrintfInner(fmt.Sprintf("%v:%v: WARN: ServerId|State|Term: %v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: WARN: ServerId|State|Term|Sign: %v|%v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId()) + format, a...)
 	case LogLevelError:
-		DPrintfInner(fmt.Sprintf("%v:%v: ERROR: ServerId|State|Term: %v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: ERROR: ServerId|State|Term|Sign: %v|%v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId()) + format, a...)
 	}
 	return
 }
@@ -116,25 +117,47 @@ func (mgr *TimerMgr) GetTimerId() int {
 
 func (mgr *TimerMgr) Schedule() {
 	for {
-		if mgr.stop {
-			return
-		}
 		currentTimerId := 0
+		timeout := false
 		for {
-			currentTimerId = <- mgr.channel
-			if currentTimerId == mgr.GetTimerId() {
-				//fmt.Println(currentTimerId, mgr.timerId)
+			select {
+				case currentTimerId = <- mgr.channel:
+
+				case <- time.After(time.Second * 2):
+
+					timeout = true
+			}
+			if timeout || currentTimerId == mgr.GetTimerId() {
 				break
 			}
 		}
 
 		if mgr.stop {
+			for {
+				timeout = false
+				select {
+					case currentTimerId = <- mgr.channel:
+
+					case <- time.After(time.Second * 2):
+						timeout = true
+				}
+				if timeout {
+					break
+				}
+			}
 			return
 		}
+
+		if timeout {
+			continue
+		}
+
 		mgr.mtx.Lock()
-		go func(callback func(int), para int) {
-			callback(para)
-		}(mgr.callback, currentTimerId)
+		if currentTimerId == mgr.timerId {
+			go func(callback func(int), para int) {
+				callback(para)
+			}(mgr.callback, currentTimerId)
+		}
 		mgr.mtx.Unlock()
 
 		go func(timerId int) {
