@@ -226,8 +226,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term < rf.currentTerm ||
-		(rf.state == ServerStateFollower && args.Term == rf.currentTerm && rf.voteFor != -1) {
+	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		DPrintf(LogLevelDebug, rf, "rej, %v %v %v\n", args.Term, rf.currentTerm, rf.voteFor)
@@ -479,8 +478,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = rf.lastApplied
 	term = rf.currentTerm
 
-
-	DPrintf(LogLevelInfo, rf, "start consensus, index %v\n", index)
+	rf.persist()
+	DPrintf(LogLevelInfo, rf, "start consensus, index|command %v|%v\n", index, command)
 
 	return index, term, isLeader
 }
@@ -497,9 +496,10 @@ func (rf *Raft) Kill() {
 	// rf.timerMgr.stop = true
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf(LogLevelInfo, rf, "Server Stop.")
+
 	rf.persist()
 	rf.timerMgr.stop = true
-	DPrintf(LogLevelInfo, rf, "Server Stop.")
 }
 
 // Generate Duration range in range
@@ -645,6 +645,10 @@ func (rf *Raft) SendHeartBeatOne(server int, elapseSignature int, reply *AppendE
 			break
 		}
 
+		for args.PrevLogIndex > 0 && rf.logTerm[args.PrevLogIndex] == rf.logTerm[args.PrevLogIndex - 1] {
+			args.PrevLogIndex--
+		}
+
 		args.PrevLogIndex--
 		if args.PrevLogIndex < 0 {
 			DPrintf(LogLevelWarning, rf, "Log match fail with server %v, Term %v %v %v\n", server, reply.Term, args.PrevLogIndex + 1, args.PrevLogTerm)
@@ -655,6 +659,10 @@ func (rf *Raft) SendHeartBeatOne(server int, elapseSignature int, reply *AppendE
 
 	// log is already up-to-date.
 	if args.PrevLogIndex == lastApplied {
+		return
+	}
+
+	if elapseSignature != rf.timerMgr.GetTimerId() {
 		return
 	}
 
@@ -914,12 +922,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = ServerStateNone
 
 	rf.mu.Lock()
-	rf.ChangeState(ServerStateNone, ServerStateFollower)
-	rf.mu.Unlock()
 
+	rf.ChangeState(ServerStateNone, ServerStateFollower)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	rf.mu.Unlock()
 
 	return rf
 }
