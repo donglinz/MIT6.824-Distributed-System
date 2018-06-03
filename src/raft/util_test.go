@@ -2,8 +2,6 @@ package raft
 
 import (
 	"testing"
-	"time"
-	"fmt"
 )
 
 func TestTimerMgr(t *testing.T){
@@ -25,12 +23,12 @@ func TestTimerMgr(t *testing.T){
 
 func TestRandomGen(t *testing.T){
 	//rand.Seed(time.Now().UnixNano())
-	rf := &Raft{}
-	rf.electionTimePeriod = 400 * time.Microsecond
-	rf.electionTimeWave = 100 * time.Microsecond
-
-	for idx := 0; idx < 10; idx++ {
-		fmt.Println(rf.GetCandidateLoopPeriod())
-	}
+	//rf := &Raft{}
+	//rf.electionTimePeriod = 400 * time.Microsecond
+	//rf.electionTimeWave = 100 * time.Microsecond
+	//
+	//for idx := 0; idx < 10; idx++ {
+	//	fmt.Println(rf.GetCandidateLoopPeriod())
+	//}
 }
 

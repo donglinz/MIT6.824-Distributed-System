@@ -205,6 +205,8 @@ type AppendEntriesArgs struct {
 	PrevLogTerm     int
 	Entries         []interface{}
 	LeaderCommit    int
+	LastLogTerm		int
+	LastLogIndex	int
 }
 
 type AppendEntriesReply struct {
@@ -218,24 +220,28 @@ func (rf *Raft) CandidateRequestVoteHandler() {}
 
 func (rf *Raft) FollowerRequestVoteHandler() {}
 
-//
-// example RequestVote RPC handler.
-//
+
+func (rf *Raft) RequestVoteCheck(args *RequestVoteArgs, checkTerm bool) bool {
+	if checkTerm && args.Term < rf.currentTerm {
+		return false
+	} else if args.LastLogTerm > rf.logTerm[rf.lastApplied] || // at least up-to-date
+		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex > rf.lastApplied) ||
+		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state == ServerStateCandidate) ||
+		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state == ServerStateFollower && rf.voteFor == -1) ||
+		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state == ServerStateFollower && rf.voteFor == args.CandidateIndex) { // at least up-to-date
+
+		return true
+	} else {
+		return false
+	}
+}
+
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term < rf.currentTerm {
-		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
-		DPrintf(LogLevelDebug, rf, "rej, %v %v %v\n", args.Term, rf.currentTerm, rf.voteFor)
-	} else if args.LastLogTerm > rf.logTerm[rf.lastApplied] || // at least up-to-date
-		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex > rf.lastApplied) ||
-		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state == ServerStateCandidate) ||
-		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state == ServerStateFollower && rf.voteFor == -1) ||
-		(args.LastLogTerm == rf.logTerm[rf.lastApplied] && args.LastLogIndex == rf.lastApplied && rf.state == ServerStateFollower && rf.voteFor == args.CandidateIndex)	{ // at least up-to-date
-		/* (args.Term == rf.currentTerm && rf.state == ServerStateCandidate && rf.voteFor == args.CandidateIndex) */
+	if rf.RequestVoteCheck(args, true) {
 		reply.VoteGranted = true
 		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
@@ -244,13 +250,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.voteFor = args.CandidateIndex
 		rf.persist()
 	} else {
-		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
-		DPrintf(LogLevelDebug, rf, "rej 2")
+		reply.VoteGranted = false
 	}
 	DPrintf(LogLevelInfo, rf, "Get RequestVote rpc from %v, Term %v, Reply %v", args.CandidateIndex, args.Term, *reply)
-
-
 }
 func (rf *Raft) AppendEntriesPreCheck(args *AppendEntriesArgs) bool {
 	return args.PrevLogIndex <= rf.lastApplied &&
@@ -263,6 +266,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 
 	reply.CommitIndex = rf.commitIndex
+
+	if !rf.AppendEntriesPreCheck(args) {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		DPrintf(LogLevelInfo, rf, "Get AppendEntries RPC from %v, Term %v, Reply %v, Pre check fail.\n", args.LeaderId, args.Term, *reply)
+		return
+	}
 
 	switch rf.state {
 	case ServerStateLeader:
@@ -283,7 +293,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = args.Term
 		reply.Success = true
 	case ServerStateCandidate:
-		if args.Term >= rf.currentTerm - 1 {
+		//if args.Term >= rf.currentTerm - 1 {
+		//	rf.ChangeState(rf.state, ServerStateFollower)
+		//	rf.voteFor = args.LeaderId
+		//	rf.currentTerm = args.Term
+		//
+		//	reply.Term = args.Term
+		//	reply.Success = true
+		//} else {
+		//	reply.Term = rf.currentTerm
+		//	reply.Success = false
+		//}
+		if rf.RequestVoteCheck(&RequestVoteArgs{args.Term,
+		args.LeaderId,
+		args.LastLogTerm,
+		args.LastLogIndex}, false) {
 			rf.ChangeState(rf.state, ServerStateFollower)
 			rf.voteFor = args.LeaderId
 			rf.currentTerm = args.Term
@@ -296,7 +320,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 	case ServerStateFollower:
-		if args.Term >= rf.currentTerm {
+		if args.Term > rf.currentTerm || (args.Term == rf.currentTerm && rf.voteFor == args.LeaderId){
 			/* (args.Term == rf.currentTerm && rf.voteFor == args.LeaderId) {*/
 			rf.ResetCurrentTimer()
 			rf.voteFor = args.LeaderId
@@ -310,12 +334,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	if !rf.AppendEntriesPreCheck(args) {
-		reply.Success = false
-		reply.Term = rf.currentTerm
-		DPrintf(LogLevelInfo, rf, "Get AppendEntries RPC from %v, Term %v, Reply %v, Pre check fail.\n", args.LeaderId, args.Term, *reply)
-		return
-	}
 
 	if !reply.Success {
 		DPrintf(LogLevelInfo, rf, "Get AppendEntries RPC from %v, Term %v, Reply %v\n", args.LeaderId, args.Term, *reply)
@@ -337,21 +355,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.logTerm = append(rf.logTerm, rf.currentTerm)
 		}
 	}
+
 	rf.lastApplied = args.PrevLogIndex + len(args.Entries)
-	rf.log = rf.log[:rf.lastApplied + 1]
-	rf.logTerm = rf.logTerm[:rf.lastApplied + 1]
+	//rf.log = rf.log[:rf.lastApplied + 1]
+	//rf.logTerm = rf.logTerm[:rf.lastApplied + 1]
 
-	if rf.commitIndex > rf.lastApplied {
-		rf.commitIndex = rf.lastApplied
-		reply.CommitIndex = rf.commitIndex
-	}
-
-	// change commit status
-	if args.LeaderCommit < rf.commitIndex {
-		DPrintf(LogLevelWarning, rf, "commit log index ahead of leader, possibly inconsistent")
-		rf.commitIndex = args.LeaderCommit
-		reply.CommitIndex = rf.commitIndex
-	}
+	//if rf.commitIndex > rf.lastApplied {
+	//	DPrintf(LogLevelWarning, rf, "Commit index revert.")
+	//	rf.commitIndex = rf.lastApplied
+	//	reply.CommitIndex = rf.commitIndex
+	//}
+	//
+	//// change commit status
+	//if args.LeaderCommit < rf.commitIndex {
+	//	DPrintf(LogLevelWarning, rf, "commit log index ahead of leader, possibly inconsistent")
+	//	rf.commitIndex = args.LeaderCommit
+	//	reply.CommitIndex = rf.commitIndex
+	//}
 
 	if args.LeaderCommit > rf.commitIndex {
 		// rf.followerCommitMu.Lock()
@@ -627,6 +647,8 @@ func (rf *Raft) SendHeartBeatOne(server int, elapseSignature int, reply *AppendE
 		PrevLogIndex:       lastApplied,
 		PrevLogTerm:        rf.logTerm[lastApplied],
 		LeaderCommit:       rf.commitIndex,
+		LastLogTerm:		rf.logTerm[lastApplied],
+		LastLogIndex:		lastApplied,
 	}
 
 	// Find log matching point
@@ -867,9 +889,9 @@ func (rf *Raft) ChangeState(oldState int, newState int) {
 	case ServerStateLeader:
 		rf.timerMgr.SetEvent(rf.LeaderLoop, rf.GetLeaderLoopPeriod)
 	case ServerStateCandidate:
-		if oldState != ServerStateCandidate {
+		//if oldState != ServerStateCandidate {
 			rf.currentTerm++
-		}
+		//}
 		rf.timerMgr.SetEvent(rf.CandidateLoop, rf.GetCandidateLoopPeriod)
 	case ServerStateFollower:
 		rf.timerMgr.SetEvent(rf.FollowerLoop, rf.GetFollowerLoopPeriod)

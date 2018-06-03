@@ -54,13 +54,13 @@ func DPrintf(logLevel int, rf *Raft, format string, a ...interface{}) (n int, er
 	file = file[58:]
 	switch logLevel {
 	case LogLevelDebug:
-		DPrintfInner(fmt.Sprintf("%v:%v: DEBUG: ServerId|State|Term|Sign: %v|%v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId()) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: DEBUG: ServerId|State|Term|Sign: %v|%v|%v|%v LastIndex|LastTerm|CommitIndex %v|%v|%v\n    ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId(), rf.lastApplied, rf.logTerm[rf.lastApplied], rf.commitIndex) + format, a...)
 	case LogLevelInfo:
-		DPrintfInner(fmt.Sprintf("%v:%v: INFO: ServerId|State|Term|Sign: %v|%v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId()) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: INFO: ServerId|State|Term|Sign: %v|%v|%v|%v LastIndex|LastTerm|CommitIndex %v|%v|%v\n    ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId(), rf.lastApplied, rf.logTerm[rf.lastApplied], rf.commitIndex) + format, a...)
 	case LogLevelWarning:
-		DPrintfInner(fmt.Sprintf("%v:%v: WARN: ServerId|State|Term|Sign: %v|%v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId()) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: WARN: ServerId|State|Term|Sign: %v|%v|%v|%v LastIndex|LastTerm|CommitIndex %v|%v|%v\n    ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId(), rf.lastApplied, rf.logTerm[rf.lastApplied], rf.commitIndex) + format, a...)
 	case LogLevelError:
-		DPrintfInner(fmt.Sprintf("%v:%v: ERROR: ServerId|State|Term|Sign: %v|%v|%v|%v ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId()) + format, a...)
+		DPrintfInner(fmt.Sprintf("%v:%v: ERROR: ServerId|State|Term|Sign: %v|%v|%v|%v LastIndex|LastTerm|CommitIndex %v|%v|%v\n    ", file, line, rf.me, StateName[rf.state], rf.currentTerm, rf.timerMgr.GetTimerId(), rf.lastApplied, rf.logTerm[rf.lastApplied], rf.commitIndex) + format, a...)
 	}
 	return
 }
